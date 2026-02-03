@@ -12,13 +12,16 @@ const Login = ({ onLogin }) => {
     setError('');
     setLoading(true);
 
-    setTimeout(() => {
-      const result = onLogin(email, password);
+    try {
+      const result = await onLogin(email, password);
       if (!result.success) {
-        setError(result.error);
+        setError(result.error || 'Login failed');
         setLoading(false);
       }
-    }, 500);
+    } catch (err) {
+      setError(err.message || 'Login failed');
+      setLoading(false);
+    }
   };
 
   return (

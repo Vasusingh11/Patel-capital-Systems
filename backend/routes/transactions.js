@@ -15,7 +15,7 @@ router.get('/', auth, async (req, res) => {
         t.*,
         i.name as investor_name,
         c.name as company_name
-      FROM transactions t
+      FROM investor_transactions t
       LEFT JOIN investors i ON t.investor_id = i.id
       LEFT JOIN companies c ON i.company_id = c.id
       WHERE 1=1
@@ -40,7 +40,7 @@ router.get('/', auth, async (req, res) => {
     }
     
     if (type) {
-      queryText += ` AND t.type = $${paramCount++}`;
+      queryText += ` AND t.transaction_type = $${paramCount++}`;
       params.push(type);
     }
     
@@ -70,46 +70,65 @@ router.post('/', auth, async (req, res) => {
     const {
       investor_id,
       transaction_date,
-      type,
+      transaction_type,
       amount,
       description,
-      metadata
+      balance_after
     } = req.body;
 
-    if (!investor_id || !transaction_date || !type) {
+    if (!investor_id || !transaction_date || !transaction_type) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields'
+        message: 'Missing required fields: investor_id, transaction_date, transaction_type'
       });
+    }
+
+    // Calculate balance_after if not provided
+    let calculatedBalanceAfter = balance_after;
+    if (!calculatedBalanceAfter) {
+      // Get current balance before this transaction
+      const balanceResult = await query(
+        `SELECT COALESCE(SUM(
+          CASE 
+            WHEN transaction_type IN ('initial', 'investment', 'interest-earned', 'adjustment', 'bonus') THEN amount
+            WHEN transaction_type IN ('withdrawal', 'interest-paid') THEN -amount
+            ELSE 0
+          END
+        ), 0) as balance
+        FROM investor_transactions
+        WHERE investor_id = $1 AND transaction_date < $2`,
+        [investor_id, transaction_date]
+      );
+      
+      const currentBalance = parseFloat(balanceResult.rows[0].balance || 0);
+      
+      // Calculate new balance
+      if (['initial', 'investment', 'interest-earned', 'adjustment', 'bonus'].includes(transaction_type)) {
+        calculatedBalanceAfter = currentBalance + parseFloat(amount || 0);
+      } else if (['withdrawal', 'interest-paid'].includes(transaction_type)) {
+        calculatedBalanceAfter = currentBalance - parseFloat(amount || 0);
+      } else {
+        calculatedBalanceAfter = currentBalance;
+      }
     }
 
     const result = await transaction(async (client) => {
       // Create transaction
       const txResult = await client.query(
-        `INSERT INTO transactions 
-         (investor_id, transaction_date, type, amount, description, metadata, created_by)
+        `INSERT INTO investor_transactions 
+         (investor_id, transaction_date, transaction_type, amount, description, balance_after, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING *`,
-        [investor_id, transaction_date, type, amount || 0, description, metadata ? JSON.stringify(metadata) : null, req.user.id]
+        [investor_id, transaction_date, transaction_type, amount || 0, description || '', calculatedBalanceAfter, req.user.id]
       );
 
       const newTransaction = txResult.rows[0];
 
-      // If it's a rate change, create rate change record
-      if (type === 'rate-change' && metadata) {
-        const { old_rate, new_rate, principal_at_change } = metadata;
-        
+      // Update investor's current_balance if this affects it
+      if (['initial', 'investment', 'withdrawal', 'interest-earned', 'interest-paid', 'adjustment', 'bonus'].includes(transaction_type)) {
         await client.query(
-          `INSERT INTO rate_changes 
-           (investor_id, transaction_id, effective_date, old_rate, new_rate, principal_at_change, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [investor_id, newTransaction.id, transaction_date, old_rate, new_rate, principal_at_change, req.user.id]
-        );
-
-        // Update investor's current rate
-        await client.query(
-          'UPDATE investors SET current_rate = $1 WHERE id = $2',
-          [new_rate, investor_id]
+          'UPDATE investors SET current_balance = $1 WHERE id = $2',
+          [calculatedBalanceAfter, investor_id]
         );
       }
 
@@ -136,7 +155,7 @@ router.post('/', auth, async (req, res) => {
 router.put('/:id', auth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { transaction_date, type, amount, description, metadata } = req.body;
+    const { transaction_date, transaction_type, amount, description, balance_after } = req.body;
     
     const updates = [];
     const values = [];
@@ -146,9 +165,9 @@ router.put('/:id', auth, async (req, res) => {
       updates.push(`transaction_date = $${paramCount++}`);
       values.push(transaction_date);
     }
-    if (type !== undefined) {
-      updates.push(`type = $${paramCount++}`);
-      values.push(type);
+    if (transaction_type !== undefined) {
+      updates.push(`transaction_type = $${paramCount++}`);
+      values.push(transaction_type);
     }
     if (amount !== undefined) {
       updates.push(`amount = $${paramCount++}`);
@@ -158,9 +177,9 @@ router.put('/:id', auth, async (req, res) => {
       updates.push(`description = $${paramCount++}`);
       values.push(description);
     }
-    if (metadata !== undefined) {
-      updates.push(`metadata = $${paramCount++}`);
-      values.push(JSON.stringify(metadata));
+    if (balance_after !== undefined) {
+      updates.push(`balance_after = $${paramCount++}`);
+      values.push(balance_after);
     }
 
     if (updates.length === 0) {
@@ -173,7 +192,7 @@ router.put('/:id', auth, async (req, res) => {
     values.push(id);
 
     const result = await query(
-      `UPDATE transactions
+      `UPDATE investor_transactions
        SET ${updates.join(', ')}
        WHERE id = $${paramCount}
        RETURNING *`,
@@ -209,7 +228,7 @@ router.delete('/:id', auth, async (req, res) => {
     const { id } = req.params;
 
     const result = await query(
-      'DELETE FROM transactions WHERE id = $1 RETURNING *',
+      'DELETE FROM investor_transactions WHERE id = $1 RETURNING *',
       [id]
     );
 

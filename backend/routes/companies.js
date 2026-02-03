@@ -11,11 +11,9 @@ router.get('/', auth, async (req, res) => {
     const result = await query(`
       SELECT 
         c.*,
-        cs.investor_count,
-        cs.total_balance,
-        cs.total_interest_paid
+        (SELECT COUNT(*) FROM investors i WHERE i.company_id = c.id AND i.status = 'active') as investor_count,
+        (SELECT COALESCE(SUM(current_balance), 0) FROM investors i WHERE i.company_id = c.id AND i.status = 'active') as total_balance
       FROM companies c
-      LEFT JOIN company_summaries cs ON c.id = cs.company_id
       WHERE c.is_active = true
       ORDER BY c.name
     `);

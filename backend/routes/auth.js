@@ -52,10 +52,10 @@ router.post('/register', auth, isAdmin, async (req, res) => {
 
     // Create user
     const result = await query(
-      `INSERT INTO users (name, email, password_hash, role, created_by)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, name, email, role, created_at`,
-      [name, email.toLowerCase(), passwordHash, role, req.user.id]
+      `INSERT INTO users (full_name, email, password_hash, role)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, full_name as name, email, role, created_at`,
+      [name, email.toLowerCase(), passwordHash, role]
     );
 
     const newUser = result.rows[0];
@@ -122,12 +122,6 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Update last login
-    await query(
-      'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1',
-      [user.id]
-    );
-
     // Generate token
     const token = generateToken(user);
 
@@ -138,7 +132,7 @@ router.post('/login', async (req, res) => {
         token,
         user: {
           id: user.id,
-          name: user.name,
+          name: user.full_name,
           email: user.email,
           role: user.role
         }
@@ -159,7 +153,7 @@ router.post('/login', async (req, res) => {
 router.get('/me', auth, async (req, res) => {
   try {
     const result = await query(
-      'SELECT id, name, email, role, created_at, last_login FROM users WHERE id = $1',
+      'SELECT id, full_name as name, email, role, created_at FROM users WHERE id = $1',
       [req.user.id]
     );
 
@@ -182,7 +176,7 @@ router.get('/me', auth, async (req, res) => {
 router.get('/users', auth, isAdmin, async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, name, email, role, is_active, created_at, last_login
+      `SELECT id, full_name as name, email, role, is_active, created_at
        FROM users
        ORDER BY created_at DESC`
     );
@@ -214,7 +208,7 @@ router.put('/users/:id', auth, isAdmin, async (req, res) => {
     let paramCount = 1;
 
     if (name !== undefined) {
-      updates.push(`name = $${paramCount++}`);
+      updates.push(`full_name = $${paramCount++}`);
       values.push(name);
     }
     if (email !== undefined) {
@@ -249,7 +243,7 @@ router.put('/users/:id', auth, isAdmin, async (req, res) => {
       `UPDATE users
        SET ${updates.join(', ')}
        WHERE id = $${paramCount}
-       RETURNING id, name, email, role, is_active`,
+       RETURNING id, full_name as name, email, role, is_active`,
       values
     );
 
@@ -282,7 +276,7 @@ router.delete('/users/:id', auth, isAdmin, async (req, res) => {
     const { id } = req.params;
 
     const result = await query(
-      'DELETE FROM users WHERE id = $1 RETURNING id, name, email',
+      'DELETE FROM users WHERE id = $1 RETURNING id, full_name as name, email',
       [id]
     );
 

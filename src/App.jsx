@@ -17,7 +17,11 @@ import {
   Mail,
   FileSpreadsheet,
   RefreshCw,
-  Trash2
+  Trash2,
+  Archive,
+  ArchiveRestore,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 
 import { 
@@ -49,6 +53,25 @@ import {
   initializeAuth
 } from './utils/auth';
 
+import {
+  apiLogin,
+  apiLogout,
+  apiGetInvestors,
+  apiGetCompanies,
+  apiCreateInvestor,
+  apiUpdateInvestor,
+  apiDeleteInvestor,
+  apiCreateTransaction,
+  apiUpdateTransaction,
+  apiDeleteTransaction,
+  loadAllDataFromAPI,
+  checkAPIHealth,
+  transformInvestorToAPI,
+  transformTransactionToAPI,
+  setToken,
+  getToken
+} from './utils/api';
+
 import Login from './components/Login';
 import UserManagement from './components/UserManagement';
 
@@ -63,6 +86,12 @@ const PatelCapitalSystem = () => {
   const [modalData, setModalData] = useState({});
   const [searchTerm, setSearchTerm] = useState('');
   const [openDropdownId, setOpenDropdownId] = useState(null);
+  const [useAPI, setUseAPI] = useState(true); // Use backend API
+  const [isLoading, setIsLoading] = useState(false);
+  const [apiError, setApiError] = useState(null);
+  const [investorSortBy, setInvestorSortBy] = useState('name'); // 'name', 'balance', 'date'
+  const [investorSortOrder, setInvestorSortOrder] = useState('asc'); // 'asc', 'desc'
+  const [showArchived, setShowArchived] = useState(false);
 
   // Initialize authentication on mount
   useEffect(() => {
@@ -81,43 +110,107 @@ const PatelCapitalSystem = () => {
     }
   }, []);
 
-  // Handle login
-  const handleLogin = (email, password) => {
+  // Handle login - tries API first, falls back to localStorage
+  const handleLogin = async (email, password) => {
+    setIsLoading(true);
+    setApiError(null);
+    
+    // Try API login first
+    if (useAPI) {
+      try {
+        const apiResult = await apiLogin(email, password);
+        if (apiResult.success) {
+          setIsLoggedIn(true);
+          setCurrentUser(apiResult.data.user);
+          setIsLoading(false);
+          return { success: true, user: apiResult.data.user };
+        }
+      } catch (error) {
+        console.log('API login failed, trying local auth:', error.message);
+        // Fall through to local login
+      }
+    }
+    
+    // Fallback to local auth
     const result = login(email, password);
     if (result.success) {
       setIsLoggedIn(true);
       setCurrentUser(result.user);
     }
+    setIsLoading(false);
     return result;
   };
 
   // Handle logout
   const handleLogout = () => {
     logout();
+    apiLogout(); // Clear API token
     setIsLoggedIn(false);
     setCurrentUser(null);
     setSelectedCompany(null);
     setSelectedInvestor(null);
     setActiveSection('companies');
+    setApiError(null);
   };
 
   // Handle refresh - reload data from source
-  const handleRefresh = () => {
-    // Clear localStorage to force reload from source
+  const handleRefresh = async () => {
+    setIsLoading(true);
+    setApiError(null);
+    
+    // Try API first
+    if (useAPI && getToken()) {
+      try {
+        const apiData = await loadAllDataFromAPI();
+        if (apiData && apiData.length > 0) {
+          setCompanies(apiData);
+          setSelectedCompany(null);
+          setSelectedInvestor(null);
+          setActiveSection('companies');
+          setIsLoading(false);
+          return;
+        }
+      } catch (error) {
+        console.log('API refresh failed:', error.message);
+        setApiError('Could not refresh from server.');
+      }
+    }
+    
+    // Fallback: Clear localStorage and reload from source
     localStorage.removeItem('PatelCapitalDB');
-    // Reload data
     const defaultData = getDefaultData();
     setCompanies(defaultData);
     saveToStorage(defaultData);
-    // Reset selections
     setSelectedCompany(null);
     setSelectedInvestor(null);
     setActiveSection('companies');
+    setIsLoading(false);
   };
 
-  // Initialize with data from localStorage or default data
+  // Initialize with data from API or localStorage
   useEffect(() => {
-    if (isLoggedIn) {
+    const loadData = async () => {
+      if (!isLoggedIn) return;
+      
+      setIsLoading(true);
+      setApiError(null);
+      
+      // Try API first if enabled
+      if (useAPI && getToken()) {
+        try {
+          const apiData = await loadAllDataFromAPI();
+          if (apiData && apiData.length > 0) {
+            setCompanies(apiData);
+            setIsLoading(false);
+            return;
+          }
+        } catch (error) {
+          console.log('API load failed, falling back to localStorage:', error.message);
+          setApiError('Could not load from server. Using local data.');
+        }
+      }
+      
+      // Fallback to localStorage
       const stored = loadFromStorage();
       if (stored) {
         setCompanies(stored);
@@ -126,8 +219,11 @@ const PatelCapitalSystem = () => {
         setCompanies(defaultData);
         saveToStorage(defaultData);
       }
-    }
-  }, [isLoggedIn]);
+      setIsLoading(false);
+    };
+    
+    loadData();
+  }, [isLoggedIn, useAPI]);
 
   // Save to localStorage whenever companies change
   useEffect(() => {
@@ -176,13 +272,12 @@ const PatelCapitalSystem = () => {
 
   const formatDateForStorage = (dateStr) => {
     // Convert YYYY-MM-DD (from input) to DD-MMM-YYYY for storage
+    // Parse directly to avoid timezone issues
     if (typeof dateStr === 'string' && dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
       const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-      const date = new Date(dateStr);
-      const day = String(date.getDate()).padStart(2, '0');
-      const month = monthNames[date.getMonth()];
-      const year = date.getFullYear();
-      return `${day}-${month}-${year}`;
+      const [year, month, day] = dateStr.split('-');
+      const monthIndex = parseInt(month) - 1;
+      return `${day}-${monthNames[monthIndex]}-${year}`;
     }
     return dateStr;
   };
@@ -273,7 +368,42 @@ const PatelCapitalSystem = () => {
     alert('Company added successfully!');
   };
 
-  const addInvestor = (data) => {
+  const addInvestor = async (data) => {
+    setIsLoading(true);
+    
+    // Try API first
+    if (useAPI && getToken()) {
+      try {
+        const investorData = {
+          company_id: parseInt(selectedCompany.id),
+          name: data.name,
+          email: data.email || '',
+          phone: data.phone || '',
+          address: data.address || '',
+          initial_investment: parseFloat(data.initialInvestment),
+          interest_rate: parseFloat(data.interestRate),
+          investment_date: data.startDate,
+          notes: data.reinvesting ? 'Reinvesting' : 'Interest paid out'
+        };
+        
+        const result = await apiCreateInvestor(investorData);
+        
+        if (result.success) {
+          // Reload data from API to get updated list
+          const apiData = await loadAllDataFromAPI();
+          setCompanies(apiData);
+          setShowModal(null);
+          setIsLoading(false);
+          alert('Investor created successfully!');
+          return;
+        }
+      } catch (error) {
+        console.error('API create investor failed:', error);
+        setApiError('Failed to save to server: ' + error.message);
+      }
+    }
+    
+    // Fallback to localStorage
     const updatedCompanies = companies.map(company => {
       if (company.id === selectedCompany.id) {
         const newInvestor = {
@@ -294,9 +424,104 @@ const PatelCapitalSystem = () => {
     });
     setCompanies(updatedCompanies);
     setShowModal(null);
+    setIsLoading(false);
   };
 
-  const updateInvestor = (investorId, updates) => {
+  const updateInvestor = async (investorId, updates) => {
+    // Try to update via API first
+    if (useAPI && getToken()) {
+      try {
+        // Check for rate change BEFORE updating
+        const investor = selectedCompany.investors.find(inv => inv.id === investorId);
+        const oldRate = investor?.interestRate;
+        const newRate = updates.interestRate ? parseFloat(updates.interestRate) : oldRate;
+        const rateChanged = oldRate !== newRate;
+        
+        // If rate changed, create rate-change transaction via API first
+        if (rateChanged && investor) {
+          const today = getTodayFormatted();
+          
+          // Check if rate-change transaction already exists for today
+          const rateChangeExists = investor.transactions.some(
+            t => t.type === 'rate-change' && t.date === today
+          );
+          
+          if (!rateChangeExists) {
+            try {
+              const rateChangeTransaction = {
+                date: today,
+                type: 'rate-change',
+                amount: 0,
+                description: `Interest Rate Changed from ${oldRate}% to ${newRate}%`
+              };
+              
+              const transactionData = transformTransactionToAPI(rateChangeTransaction, investorId);
+              await apiCreateTransaction(transactionData);
+              console.log('Rate change transaction created via API');
+            } catch (error) {
+              console.error('Failed to create rate-change transaction:', error);
+              // Continue with investor update even if rate-change transaction fails
+            }
+          }
+        }
+        
+        // Convert startDate from YYYY-MM-DD (form input) to YYYY-MM-DD (API expects this format)
+        let investmentDate = undefined;
+        if (updates.startDate) {
+          // If it's already YYYY-MM-DD, use it directly
+          if (updates.startDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
+            investmentDate = updates.startDate;
+          } else {
+            // Otherwise convert from DD-MMM-YYYY to YYYY-MM-DD
+            const months = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', 
+                           Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
+            const match = updates.startDate.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+            if (match) {
+              const [, day, mon, year] = match;
+              investmentDate = `${year}-${months[mon]}-${day.padStart(2, '0')}`;
+            }
+          }
+        }
+        
+        const apiUpdates = {
+          name: updates.name,
+          address: updates.address,
+          email: updates.email,
+          phone: updates.phone,
+          interest_rate: updates.interestRate ? parseFloat(updates.interestRate) : undefined,
+          investment_date: investmentDate,
+          notes: updates.reinvesting !== undefined ? (updates.reinvesting ? 'Reinvesting' : 'Interest paid out') : undefined
+        };
+        // Remove undefined values
+        Object.keys(apiUpdates).forEach(key => apiUpdates[key] === undefined && delete apiUpdates[key]);
+        
+        if (Object.keys(apiUpdates).length > 0) {
+          await apiUpdateInvestor(investorId, apiUpdates);
+          console.log('Investor updated via API');
+          
+          // Reload data from API to get updated list
+          const apiData = await loadAllDataFromAPI();
+          setCompanies(apiData);
+          
+          // Update selected investor
+          const updatedInvestor = apiData
+            .find(c => c.id === selectedCompany.id)
+            ?.investors.find(i => i.id === investorId);
+          if (updatedInvestor) {
+            setSelectedInvestor(updatedInvestor);
+          }
+          
+          setShowModal(null);
+          return;
+        }
+      } catch (error) {
+        console.error('API update failed:', error);
+        setApiError('Failed to save changes to server: ' + error.message);
+        // Fall through to local state update on error
+      }
+    }
+    
+    // Fallback: Update local state (only if API not available or failed)
     const updatedCompanies = companies.map(company => {
       if (company.id === selectedCompany.id) {
         return {
@@ -329,7 +554,7 @@ const PatelCapitalSystem = () => {
               
               // If interest rate changed, add rate-change transaction and recalculate future interest
               if (oldRate !== newRate) {
-                console.log(`Rate change detected: ${oldRate}% → ${newRate}% for investor ${inv.name}`);
+                console.log(`Rate change detected: ${oldRate}% to ${newRate}% for investor ${inv.name}`);
                 const today = getTodayFormatted();
                 
                 // Check if a rate-change transaction already exists for today
@@ -344,7 +569,7 @@ const PatelCapitalSystem = () => {
                     date: today,
                     type: 'rate-change',
                     amount: 0,
-                    description: `RATE CHANGE: ${oldRate}% → ${newRate}% effective ${today}`,
+                    description: `Interest Rate Changed from ${oldRate}% to ${newRate}%`,
                     metadata: {
                       oldRate: oldRate,
                       newRate: newRate
@@ -403,11 +628,11 @@ const PatelCapitalSystem = () => {
                   // Show success message
                   console.log(`Rate change complete. ${futureTransactionsUpdated} future transactions updated.`);
                   setTimeout(() => {
-                    alert(`✅ Interest rate updated successfully!\n\n` +
-                          `• Changed from ${oldRate}% to ${newRate}%\n` +
-                          `• Effective date: ${today}\n` +
-                          `• Rate change transaction added\n` +
-                          `• ${futureTransactionsUpdated} future interest transaction(s) recalculated`);
+                    alert(`Interest rate updated successfully!\n\n` +
+                          `Changed from ${oldRate}% to ${newRate}%\n` +
+                          `Effective date: ${today}\n` +
+                          `Rate change transaction added\n` +
+                          `${futureTransactionsUpdated} future interest transaction(s) recalculated`);
                   }, 100);
                 } else {
                   console.log('Rate change transaction already exists for today, skipping.');
@@ -431,7 +656,82 @@ const PatelCapitalSystem = () => {
     setShowModal(null);
   };
 
-  const addTransaction = (investorId, transaction) => {
+  const archiveInvestor = async (investorId, archive = true) => {
+    const investor = selectedCompany.investors.find(inv => inv.id === investorId);
+    if (!investor) return;
+    
+    const action = archive ? 'archive' : 'restore';
+    if (!window.confirm(`Are you sure you want to ${action} ${investor.name}?`)) {
+      return;
+    }
+    
+    // Try to update via API
+    if (useAPI && getToken()) {
+      try {
+        await apiUpdateInvestor(investorId, { 
+          status: archive ? 'inactive' : 'active' 
+        });
+        console.log(`Investor ${action}d via API`);
+      } catch (error) {
+        console.error(`API ${action} failed:`, error);
+        setApiError(`Failed to ${action} investor: ` + error.message);
+      }
+    }
+    
+    // Update local state
+    const updatedCompanies = companies.map(company => {
+      if (company.id === selectedCompany.id) {
+        return {
+          ...company,
+          investors: company.investors.map(inv => {
+            if (inv.id === investorId) {
+              return { ...inv, archived: archive };
+            }
+            return inv;
+          })
+        };
+      }
+      return company;
+    });
+    setCompanies(updatedCompanies);
+    
+    // Clear selected investor if it was archived
+    if (selectedInvestor?.id === investorId && archive) {
+      setSelectedInvestor(null);
+    }
+    
+    alert(`Investor ${archive ? 'archived' : 'restored'} successfully!`);
+  };
+
+  const addTransaction = async (investorId, transaction) => {
+    // Try to save via API first
+    if (useAPI && getToken()) {
+      try {
+        const transactionData = transformTransactionToAPI(transaction, investorId);
+        await apiCreateTransaction(transactionData);
+        console.log('Transaction saved via API');
+        
+        // Reload data from API to get updated list
+        const apiData = await loadAllDataFromAPI();
+        setCompanies(apiData);
+        
+        // Update selected investor
+        const updatedInvestor = apiData
+          .find(c => c.id === selectedCompany.id)
+          ?.investors.find(i => i.id === investorId);
+        if (updatedInvestor) {
+          setSelectedInvestor(updatedInvestor);
+        }
+        
+        setShowModal(null);
+        return;
+      } catch (error) {
+        console.error('API create transaction failed:', error);
+        setApiError('Failed to save to server: ' + error.message);
+      }
+    }
+    
+    // Fallback to local state
     const updatedCompanies = companies.map(company => {
       if (company.id === selectedCompany.id) {
         return {
@@ -516,10 +816,43 @@ const PatelCapitalSystem = () => {
     setShowModal(null);
   };
 
-  const deleteTransaction = (investorId, transactionIndex) => {
+  const deleteTransaction = async (investorId, transactionIndex) => {
     if (!window.confirm('Are you sure you want to delete this transaction? This action cannot be undone.')) {
       return;
     }
+    
+    const investor = selectedCompany.investors.find(inv => inv.id === investorId);
+    if (!investor || !investor.transactions[transactionIndex]) return;
+    
+    const deletedTransaction = investor.transactions[transactionIndex];
+    
+    // Try to delete via API first
+    if (useAPI && getToken() && deletedTransaction.id) {
+      try {
+        await apiDeleteTransaction(deletedTransaction.id);
+        console.log('Transaction deleted via API');
+        
+        // Reload data from API to get updated list
+        const apiData = await loadAllDataFromAPI();
+        setCompanies(apiData);
+        
+        // Update selected investor
+        const updatedInvestor = apiData
+          .find(c => c.id === selectedCompany.id)
+          ?.investors.find(i => i.id === investorId);
+        if (updatedInvestor) {
+          setSelectedInvestor(updatedInvestor);
+        }
+        
+        return;
+      } catch (error) {
+        console.error('API delete transaction failed:', error);
+        setApiError('Failed to delete on server: ' + error.message);
+      }
+    }
+    
+    // Fallback to local state
+    const deletedDate = parseDate(deletedTransaction.date);
     
     const updatedCompanies = companies.map(company => {
       if (company.id === selectedCompany.id) {
@@ -527,9 +860,6 @@ const PatelCapitalSystem = () => {
           ...company,
           investors: company.investors.map(inv => {
             if (inv.id === investorId) {
-              const deletedTransaction = inv.transactions[transactionIndex];
-              const deletedDate = parseDate(deletedTransaction.date);
-              
               // Remove the transaction
               let updatedTransactions = inv.transactions.filter((_, index) => index !== transactionIndex);
               
@@ -593,7 +923,10 @@ const PatelCapitalSystem = () => {
       return company;
     });
     setCompanies(updatedCompanies);
+    // Only save to localStorage if not using API
+    if (!useAPI || !getToken()) {
     saveToStorage(updatedCompanies);
+    }
     setSelectedInvestor(updatedCompanies.find(c => c.id === selectedCompany.id).investors.find(i => i.id === investorId));
   };
 
@@ -604,7 +937,7 @@ const PatelCapitalSystem = () => {
     const oldRate = investor.interestRate;
     const effectiveDateObj = new Date(effectiveDate);
     
-    console.log(`Processing rate change: ${oldRate}% → ${newRate}% effective ${effectiveDate}`);
+    console.log(`Processing rate change: ${oldRate}% to ${newRate}% effective ${effectiveDate}`);
     console.log(`Recalculate future transactions: ${recalculateFuture}`);
     
     const updatedCompanies = companies.map(company => {
@@ -625,8 +958,8 @@ const PatelCapitalSystem = () => {
                 type: 'rate-change',
                 amount: 0,
                 description: reason 
-                  ? `RATE CHANGE: ${oldRate}% → ${newRate}% effective ${effectiveDate} - ${reason}` 
-                  : `RATE CHANGE: ${oldRate}% → ${newRate}% effective ${effectiveDate}`,
+                  ? `Interest Rate Changed from ${oldRate}% to ${newRate}% - ${reason}` 
+                  : `Interest Rate Changed from ${oldRate}% to ${newRate}%`,
                 metadata: {
                   oldRate: oldRate,
                   newRate: parseFloat(newRate),
@@ -716,7 +1049,7 @@ const PatelCapitalSystem = () => {
     setShowModal(null);
   };
 
-  const calculateQuarterlyInterest = (quarter, year, reinvest) => {
+  const calculateQuarterlyInterest = async (quarter, year, reinvest) => {
     if (!selectedInvestor) {
       alert('❌ No investor selected!');
       return;
@@ -815,6 +1148,74 @@ const PatelCapitalSystem = () => {
     
     console.log('New transactions count:', updatedCompanies.find(c => c.id === selectedCompany.id).investors.find(i => i.id === selectedInvestor.id).transactions.length);
     
+    // Try to save via API first
+    if (useAPI && getToken()) {
+      try {
+        setIsLoading(true);
+        
+        // Create transactions via API
+        const transactionsToCreate = [];
+        
+        if (reinvest) {
+          transactionsToCreate.push({
+            date: endDate,
+            type: 'interest-earned',
+            amount: interestAmount,
+            description: `${quarter} ${year} Interest Earned/Reinvested @ ${selectedInvestor.interestRate}%`
+          });
+        } else {
+          transactionsToCreate.push({
+            date: endDate,
+            type: 'interest-earned',
+            amount: interestAmount,
+            description: `${quarter} ${year} Interest Earned @ ${selectedInvestor.interestRate}%`
+          });
+          transactionsToCreate.push({
+            date: endDate,
+            type: 'interest-paid',
+            amount: interestAmount,
+            description: 'Interest paid'
+          });
+        }
+        
+        // Create all transactions via API
+        for (const tx of transactionsToCreate) {
+          const transactionData = transformTransactionToAPI(tx, selectedInvestor.id);
+          await apiCreateTransaction(transactionData);
+        }
+        
+        // Also update reinvesting status if it changed
+        if (selectedInvestor.reinvesting !== reinvest) {
+          await apiUpdateInvestor(selectedInvestor.id, {
+            notes: reinvest ? 'Reinvesting' : 'Interest paid out'
+          });
+        }
+        
+        // Reload data from API to get updated list
+        const apiData = await loadAllDataFromAPI();
+        setCompanies(apiData);
+        
+        // Update selected investor from reloaded data
+        const reloadedCompany = apiData.find(c => c.id === selectedCompany.id);
+        if (reloadedCompany) {
+          const reloadedInvestor = reloadedCompany.investors.find(i => i.id === selectedInvestor.id);
+          if (reloadedInvestor) {
+            setSelectedInvestor(reloadedInvestor);
+          }
+        }
+        
+        setIsLoading(false);
+        alert(`✅ Interest calculated and added!\n\nAmount: $${interestAmount.toFixed(2)}\nQuarter: ${quarter} ${year}\nReinvested: ${reinvest ? 'Yes' : 'No (paid out)'}\n\nTransactions created: ${reinvest ? '1' : '2'}`);
+        return;
+      } catch (error) {
+        console.error('API create transaction failed:', error);
+        setApiError('Failed to save to server: ' + error.message);
+        setIsLoading(false);
+        // Fall through to local storage
+      }
+    }
+    
+    // Fallback to local storage
     // Update state and save
     setCompanies(updatedCompanies);
     saveToStorage(updatedCompanies);
@@ -865,7 +1266,7 @@ const PatelCapitalSystem = () => {
       return `
         <tr style="background: ${bgColor}; ${tx.type === 'rate-change' ? 'font-style: italic;' : ''}">
           <td style="padding: 8px 12px; border-bottom: 1px solid #e5e5e5;">${formatDateForDisplay(tx.date)}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e5e5;">${tx.description}${tx.metadata?.manualEntry ? ' 📝' : ''}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e5e5;">${tx.description}</td>
           <td style="padding: 8px 12px; border-bottom: 1px solid #e5e5e5; text-align: right;">${credit}</td>
           <td style="padding: 8px 12px; border-bottom: 1px solid #e5e5e5; text-align: right;">${debit}</td>
           <td style="padding: 8px 12px; border-bottom: 1px solid #e5e5e5; text-align: right;">${balanceDisplay}</td>
@@ -1019,10 +1420,43 @@ const PatelCapitalSystem = () => {
     URL.revokeObjectURL(url);
   };
 
-  const filteredInvestors = selectedCompany?.investors.filter(inv => 
-    inv.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    inv.email.toLowerCase().includes(searchTerm.toLowerCase())
-  ) || [];
+  // Helper function to calculate total invested for sorting
+  const calculateTotalInvested = (investor) => {
+    let total = 0;
+    (investor.transactions || []).forEach(tx => {
+      if (['initial', 'investment'].includes(tx.type)) {
+        total += tx.amount;
+      } else if (tx.type === 'withdrawal') {
+        total -= tx.amount;
+      }
+    });
+    return total;
+  };
+
+  const filteredInvestors = (selectedCompany?.investors || [])
+    .filter(inv => {
+      // Filter by search term
+      const matchesSearch = inv.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (inv.email && inv.email.toLowerCase().includes(searchTerm.toLowerCase()));
+      // Filter by archived status
+      const matchesArchived = showArchived ? inv.archived : !inv.archived;
+      return matchesSearch && matchesArchived;
+    })
+    .sort((a, b) => {
+      let comparison = 0;
+      if (investorSortBy === 'name') {
+        comparison = a.name.localeCompare(b.name);
+      } else if (investorSortBy === 'balance') {
+        comparison = calculateCurrentBalance(a) - calculateCurrentBalance(b);
+      } else if (investorSortBy === 'investment') {
+        comparison = calculateTotalInvested(a) - calculateTotalInvested(b);
+      } else if (investorSortBy === 'date') {
+        comparison = new Date(parseDate(a.startDate)) - new Date(parseDate(b.startDate));
+      } else if (investorSortBy === 'rate') {
+        comparison = a.interestRate - b.interestRate;
+      }
+      return investorSortOrder === 'asc' ? comparison : -comparison;
+    });
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-200">
@@ -1130,7 +1564,9 @@ const PatelCapitalSystem = () => {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {companies.map(company => {
-                const totalInvestment = company.investors.reduce((sum, inv) => sum + calculateCurrentBalance(inv), 0);
+                // Filter out archived investors for all calculations
+                const activeInvestors = company.investors.filter(inv => !inv.archived);
+                const totalInvestment = activeInvestors.reduce((sum, inv) => sum + calculateCurrentBalance(inv), 0);
                 return (
                   <div
                     key={company.id}
@@ -1148,16 +1584,16 @@ const PatelCapitalSystem = () => {
                     <h3 className="text-xl font-bold text-gray-900 mb-4">{company.name}</h3>
                     <div className="grid grid-cols-2 gap-4 mb-4">
                       <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-4 rounded-lg text-center">
-                        <div className="text-2xl font-bold text-blue-900">{company.investors.length}</div>
+                        <div className="text-2xl font-bold text-blue-900">{activeInvestors.length}</div>
                         <div className="text-xs text-gray-600 uppercase">Investors</div>
                       </div>
                       <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-lg text-center">
                         <div className="text-2xl font-bold text-green-900">{(() => {
-                          // Calculate weighted average interest rate
+                          // Calculate weighted average interest rate (only active investors)
                           let totalWeightedRate = 0;
                           let totalPrincipal = 0;
                           
-                          company.investors.forEach(investor => {
+                          activeInvestors.forEach(investor => {
                             // Calculate principal for this investor
                             let principal = 0;
                             investor.transactions.forEach(tx => {
@@ -1205,16 +1641,9 @@ const PatelCapitalSystem = () => {
             </div>
             {selectedCompany && (
               <div className="bg-white rounded-xl shadow-lg overflow-hidden">
-                <div className="bg-gradient-to-r from-blue-900 to-blue-800 text-white p-6 flex justify-between items-center">
+                <div className="bg-gradient-to-r from-blue-900 to-blue-800 text-white p-6">
+                  <div className="flex justify-between items-center mb-4">
                   <h3 className="text-xl font-semibold">Investor Accounts</h3>
-                  <div className="flex gap-3">
-                    <input
-                      type="text"
-                      placeholder="Search investors..."
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      className="px-4 py-2 rounded-lg text-gray-900 text-sm"
-                    />
                     <button
                       onClick={() => {
                         setModalData({});
@@ -1226,17 +1655,104 @@ const PatelCapitalSystem = () => {
                       Add Investor
                     </button>
                   </div>
+                  <div className="flex gap-3 items-center flex-wrap">
+                    <input
+                      type="text"
+                      placeholder="Search investors..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="px-4 py-2 rounded-lg text-gray-900 text-sm flex-grow min-w-[200px]"
+                    />
+                    <button
+                      onClick={() => setShowArchived(!showArchived)}
+                      className={`px-3 py-2 rounded-lg transition text-sm font-medium ${
+                        showArchived 
+                          ? 'bg-orange-500 text-white hover:bg-orange-600' 
+                          : 'bg-white text-blue-900 hover:bg-blue-50'
+                      }`}
+                    >
+                      {showArchived ? 'Show Active' : 'Show Archived'}
+                    </button>
+                  </div>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead className="bg-gray-50">
                       <tr>
-                        <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Name</th>
+                        <th 
+                          className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => {
+                            if (investorSortBy === 'name') {
+                              setInvestorSortOrder(investorSortOrder === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setInvestorSortBy('name');
+                              setInvestorSortOrder('asc');
+                            }
+                          }}
+                        >
+                          <div className="flex items-center gap-1">
+                            Name
+                            {investorSortBy === 'name' && (
+                              investorSortOrder === 'asc' ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                            )}
+                          </div>
+                        </th>
                         <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Email</th>
-                        <th className="px-6 py-3 text-center text-xs font-semibold text-gray-700 uppercase">Investment</th>
-                        <th className="px-6 py-3 text-center text-xs font-semibold text-gray-700 uppercase">Rate</th>
+                        <th 
+                          className="px-6 py-3 text-center text-xs font-semibold text-gray-700 uppercase cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => {
+                            if (investorSortBy === 'investment') {
+                              setInvestorSortOrder(investorSortOrder === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setInvestorSortBy('investment');
+                              setInvestorSortOrder('desc');
+                            }
+                          }}
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            Investment
+                            {investorSortBy === 'investment' && (
+                              investorSortOrder === 'asc' ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                            )}
+                          </div>
+                        </th>
+                        <th 
+                          className="px-6 py-3 text-center text-xs font-semibold text-gray-700 uppercase cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => {
+                            if (investorSortBy === 'rate') {
+                              setInvestorSortOrder(investorSortOrder === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setInvestorSortBy('rate');
+                              setInvestorSortOrder('desc');
+                            }
+                          }}
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            Rate
+                            {investorSortBy === 'rate' && (
+                              investorSortOrder === 'asc' ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                            )}
+                          </div>
+                        </th>
                         <th className="px-6 py-3 text-center text-xs font-semibold text-gray-700 uppercase">Status</th>
-                        <th className="px-6 py-3 text-right text-xs font-semibold text-gray-700 uppercase">Balance</th>
+                        <th 
+                          className="px-6 py-3 text-right text-xs font-semibold text-gray-700 uppercase cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => {
+                            if (investorSortBy === 'balance') {
+                              setInvestorSortOrder(investorSortOrder === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setInvestorSortBy('balance');
+                              setInvestorSortOrder('desc');
+                            }
+                          }}
+                        >
+                          <div className="flex items-center justify-end gap-1">
+                            Balance
+                            {investorSortBy === 'balance' && (
+                              investorSortOrder === 'asc' ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                            )}
+                          </div>
+                        </th>
                         <th className="px-6 py-3 text-center text-xs font-semibold text-gray-700 uppercase">Actions</th>
                       </tr>
                     </thead>
@@ -1397,6 +1913,22 @@ const PatelCapitalSystem = () => {
                                     <Mail size={16} />
                                     <span>Send Email Notification</span>
                                   </button>
+                                  <div className="border-t border-gray-200 my-1"></div>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      archiveInvestor(investor.id, !investor.archived);
+                                      setOpenDropdownId(null);
+                                    }}
+                                    className={`w-full px-4 py-2 text-left flex items-center gap-3 ${
+                                      investor.archived 
+                                        ? 'hover:bg-green-50 text-gray-700 hover:text-green-900'
+                                        : 'hover:bg-yellow-50 text-gray-700 hover:text-yellow-900'
+                                    }`}
+                                  >
+                                    {investor.archived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
+                                    <span>{investor.archived ? 'Restore Investor' : 'Archive Investor'}</span>
+                                  </button>
                                 </div>
                               )}
                             </div>
@@ -1443,7 +1975,7 @@ const PatelCapitalSystem = () => {
                             <div className="text-xs text-gray-600 mb-1">Next Quarter Weighted Rate:</div>
                             <div className="text-lg font-bold text-orange-600">{weightedInfo.weightedRate}%</div>
                             <div className="text-xs text-gray-500 mt-1">
-                              {weightedInfo.oldRate}% ({weightedInfo.daysBeforeChange}d) → {weightedInfo.newRate}% ({weightedInfo.daysAfterChange}d)
+                              {weightedInfo.oldRate}% ({weightedInfo.daysBeforeChange}d) to {weightedInfo.newRate}% ({weightedInfo.daysAfterChange}d)
                             </div>
                           </div>
                         );
@@ -1452,9 +1984,9 @@ const PatelCapitalSystem = () => {
                     })()}
                   </div>
                   <div className="bg-white rounded-xl p-6 shadow-md border-t-4 border-purple-600">
-                    <h4 className="text-xs text-gray-600 uppercase mb-2">2025 Interest</h4>
+                    <h4 className="text-xs text-gray-600 uppercase mb-2">{new Date().getFullYear()} Interest</h4>
                     <div className="text-2xl font-bold text-purple-900">
-                      ${calculateYearlyInterest(selectedInvestor, 2025).toLocaleString()}
+                      ${calculateYearlyInterest(selectedInvestor, new Date().getFullYear()).toLocaleString()}
                     </div>
                   </div>
                   <div className="bg-white rounded-xl p-6 shadow-md border-t-4 border-orange-600">
@@ -1584,11 +2116,11 @@ const PatelCapitalSystem = () => {
                         <label className="text-sm font-medium">Auto-Reinvest</label>
                       </div>
                       <button
-                        onClick={() => {
+                        onClick={async () => {
                           const quarter = document.getElementById('quarter-select').value;
                           const year = parseInt(document.getElementById('year-input').value);
                           const reinvest = document.getElementById('reinvest-check').checked;
-                          calculateQuarterlyInterest(quarter, year, reinvest);
+                          await calculateQuarterlyInterest(quarter, year, reinvest);
                         }}
                         className="px-6 py-2 bg-white text-green-700 rounded-lg hover:bg-green-50 transition font-semibold"
                       >
@@ -1607,12 +2139,12 @@ const PatelCapitalSystem = () => {
                     <table className="w-full">
                       <thead className="bg-gray-100">
                         <tr>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Date</th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Description</th>
-                          <th className="px-6 py-3 text-right text-xs font-semibold text-gray-700 uppercase">Credits</th>
-                          <th className="px-6 py-3 text-right text-xs font-semibold text-gray-700 uppercase">Debits</th>
-                          <th className="px-6 py-3 text-right text-xs font-semibold text-gray-700 uppercase">Balance</th>
-                          <th className="px-6 py-3 text-center text-xs font-semibold text-gray-700 uppercase">Actions</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase whitespace-nowrap">Date</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase min-w-0">Description</th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-700 uppercase whitespace-nowrap min-w-[140px]">Credits</th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-700 uppercase whitespace-nowrap min-w-[140px]">Debits</th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-700 uppercase whitespace-nowrap min-w-[140px]">Balance</th>
+                          <th className="px-2 py-3 text-center text-xs font-semibold text-gray-700 uppercase whitespace-nowrap w-20">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-200">
@@ -1632,31 +2164,32 @@ const PatelCapitalSystem = () => {
                             }
 
                             const isRateChange = tx.type === 'rate-change';
-                            const balanceDisplay = isRateChange ? '-' : `$${runningBalance.toLocaleString()}`;
+                            // Handle -0 case: ensure 0 displays as $0, not $-0
+                            const balanceValue = runningBalance === 0 || runningBalance === -0 ? 0 : runningBalance;
+                            const balanceDisplay = isRateChange ? '-' : `$${balanceValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
                             return (
                               <tr key={idx} className={`hover:bg-gray-50 ${isRateChange ? 'bg-gray-50 italic' : ''}`}>
-                                <td className="px-6 py-4 text-sm">{formatDateForDisplay(tx.date)}</td>
-                                <td className="px-6 py-4 text-sm">
+                                <td className="px-4 py-4 text-sm whitespace-nowrap">{formatDateForDisplay(tx.date)}</td>
+                                <td className="px-4 py-4 text-sm break-words" style={{ maxWidth: '300px' }}>
                                   {tx.description}
-                                  {tx.metadata?.manualEntry && <span className="ml-2">📝</span>}
                                 </td>
-                                <td className="px-6 py-4 text-sm text-right text-green-600 font-semibold">
+                                <td className="px-4 py-4 text-sm text-right text-green-600 font-semibold whitespace-nowrap">
                                   {(['initial', 'investment', 'interest-earned', 'bonus'].includes(tx.type) || 
                                     (tx.type === 'adjustment' && tx.amount > 0)) 
-                                    ? `$${Math.abs(tx.amount).toLocaleString()}` 
+                                    ? `$${Math.abs(tx.amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
                                     : ''}
                                 </td>
-                                <td className="px-6 py-4 text-sm text-right text-red-600 font-semibold">
+                                <td className="px-4 py-4 text-sm text-right text-red-600 font-semibold whitespace-nowrap">
                                   {(['interest-paid', 'withdrawal', 'fee'].includes(tx.type) || 
                                     (tx.type === 'adjustment' && tx.amount < 0)) 
-                                    ? `$${Math.abs(tx.amount).toLocaleString()}` 
+                                    ? `$${Math.abs(tx.amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
                                     : ''}
                                 </td>
-                                <td className="px-6 py-4 text-sm text-right font-bold">
+                                <td className="px-4 py-4 text-sm text-right font-bold whitespace-nowrap">
                                   {balanceDisplay}
                                 </td>
-                                <td className="px-6 py-4 text-sm text-center">
+                                <td className="px-2 py-4 text-sm text-center">
                                   <button
                                     onClick={() => {
                                       setModalData({ transaction: tx, transactionIndex: idx });
@@ -1944,7 +2477,7 @@ const PatelCapitalSystem = () => {
                   <input
                     name="startDate"
                     type="date"
-                    defaultValue={modalData.startDate}
+                    defaultValue={modalData.startDate ? formatDateForInput(modalData.startDate) : ''}
                     required
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   />

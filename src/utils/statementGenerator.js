@@ -203,12 +203,20 @@ export const generateTrophyPointStatement = (investor, company, startDate = null
   doc.setFont('helvetica', 'normal');
   doc.text(investor.name || 'N/A', 20, 51);
   if (investor.address) {
-    const addressLines = investor.address.split(',');
+    // Split address intelligently: first line is street, second is city/state/zip
+    const addressParts = investor.address.split(',').map(p => p.trim());
     let yPos = 57;
-    addressLines.forEach(line => {
-      doc.text(line.trim(), 20, yPos);
+    if (addressParts.length >= 3) {
+      doc.text(addressParts[0], 20, yPos);
       yPos += 6;
-    });
+      doc.text(addressParts.slice(1).join(', '), 20, yPos);
+    } else if (addressParts.length === 2) {
+      doc.text(addressParts[0], 20, yPos);
+      yPos += 6;
+      doc.text(addressParts[1], 20, yPos);
+    } else {
+      doc.text(investor.address, 20, yPos);
+    }
   }
   
   // Period Info (right aligned)
@@ -361,7 +369,9 @@ export const generateTrophyPointStatement = (investor, company, startDate = null
       runningBalance -= Math.abs(tx.amount);
     }
     
-    const balanceStr = tx.type === 'rate-change' ? '-' : `$${runningBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    // Handle -0 case: ensure 0 displays as $0.00, not $-0.00
+    const balanceValue = runningBalance === 0 || runningBalance === -0 ? 0 : runningBalance;
+    const balanceStr = tx.type === 'rate-change' ? '-' : `$${balanceValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     
     transactionRows.push([
       dateStr,
@@ -396,7 +406,7 @@ export const generateTrophyPointStatement = (investor, company, startDate = null
       0: { cellWidth: 20, halign: 'left', valign: 'bottom' },
       1: { cellWidth: 80, halign: 'left', valign: 'bottom', cellPadding: { left: 2, right: 2 }, overflow: 'linebreak' },
       2: { cellWidth: 22, halign: 'right', valign: 'bottom' },
-      3: { cellWidth: 20, halign: 'right', valign: 'bottom' },
+      3: { cellWidth: 22, halign: 'right', valign: 'bottom' },
       4: { cellWidth: 28, halign: 'right', valign: 'bottom' }
     },
     didParseCell: function(data) {
@@ -456,7 +466,10 @@ export const generatePatelCapitalStatement = async (investor, company, startDate
   
   const portfolioValue = calculateCurrentBalance(investor);
   const totalInterest = calculateTotalInterest(investor);
-  const interest2025 = calculateYearlyInterest(investor, 2025);
+  
+  // Get current year dynamically
+  const currentYear = new Date().getFullYear();
+  const currentYearInterest = calculateYearlyInterest(investor, currentYear);
   
   // Add logo image on top center
   try {
@@ -503,26 +516,39 @@ export const generatePatelCapitalStatement = async (investor, company, startDate
   doc.text('Account Holder:', 25, 49);
   doc.setFont('times', 'normal');
   doc.text(investor.name || 'N/A', 25, 55);
+  
+  let yPos = 60;
   if (investor.address) {
     doc.setFontSize(9);
-    const addressLines = investor.address.split(',');
-    let yPos = 60;
-    addressLines.forEach(line => {
-      doc.text(line.trim(), 25, yPos);
+    // Split address intelligently: first line is street, second is city/state/zip
+    const addressParts = investor.address.split(',').map(p => p.trim());
+    if (addressParts.length >= 3) {
+      // Street address on first line
+      doc.text(addressParts[0], 25, yPos);
       yPos += 4;
-    });
+      // City, State, Zip on second line
+      doc.text(addressParts.slice(1).join(', '), 25, yPos);
+      yPos += 4;
+    } else if (addressParts.length === 2) {
+      doc.text(addressParts[0], 25, yPos);
+      yPos += 4;
+      doc.text(addressParts[1], 25, yPos);
+      yPos += 4;
+    } else {
+      doc.text(investor.address, 25, yPos);
+      yPos += 4;
+    }
   }
   
   // Contact info (left side of box, below address)
   if (investor.email || investor.phone) {
-    let contactYPos = 60 + (investor.address ? investor.address.split(',').length * 4 : 0);
     doc.setFontSize(9);
     if (investor.email) {
-      doc.text(investor.email, 25, contactYPos);
-      contactYPos += 4;
+      doc.text(investor.email, 25, yPos);
+      yPos += 4;
     }
     if (investor.phone) {
-      doc.text(investor.phone, 25, contactYPos);
+      doc.text(investor.phone, 25, yPos);
     }
   }
   
@@ -581,15 +607,15 @@ export const generatePatelCapitalStatement = async (investor, company, startDate
   doc.setFontSize(15);
   doc.text(`$${totalInterest.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 22 + boxWidth + 5, boxY + 16);
   
-  // Interest Earned in 2025 Box - Lighter Blue
+  // Interest Earned in Current Year Box - Lighter Blue
   doc.setFillColor(75, 115, 170);
   doc.rect(20 + (boxWidth + 5) * 2, boxY, boxWidth, boxHeight, 'F');
   doc.setFont('times', 'normal');
   doc.setFontSize(9);
-  doc.text('Interest Earned 2025', 22 + (boxWidth + 5) * 2, boxY + 6);
+  doc.text(`Interest Earned ${currentYear}`, 22 + (boxWidth + 5) * 2, boxY + 6);
   doc.setFont('times', 'bold');
   doc.setFontSize(15);
-  doc.text(`$${interest2025.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 22 + (boxWidth + 5) * 2, boxY + 16);
+  doc.text(`$${currentYearInterest.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 22 + (boxWidth + 5) * 2, boxY + 16);
   
   // Transaction History
   doc.setFontSize(13);
@@ -638,7 +664,9 @@ export const generatePatelCapitalStatement = async (investor, company, startDate
       runningBalance -= Math.abs(tx.amount);
     }
     
-    const balanceStr = tx.type === 'rate-change' ? '-' : `$${runningBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    // Handle -0 case: ensure 0 displays as $0.00, not $-0.00
+    const balanceValue = runningBalance === 0 || runningBalance === -0 ? 0 : runningBalance;
+    const balanceStr = tx.type === 'rate-change' ? '-' : `$${balanceValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     
     transactionRows.push([
       dateStr,
@@ -673,7 +701,7 @@ export const generatePatelCapitalStatement = async (investor, company, startDate
       0: { cellWidth: 20, halign: 'left', valign: 'bottom' },
       1: { cellWidth: 80, halign: 'left', valign: 'bottom', cellPadding: { left: 2, right: 2 }, overflow: 'linebreak' },
       2: { cellWidth: 20, halign: 'right', valign: 'bottom' },
-      3: { cellWidth: 18, halign: 'right', valign: 'bottom' },
+      3: { cellWidth: 20, halign: 'right', valign: 'bottom' },
       4: { cellWidth: 28, halign: 'right', valign: 'bottom' }
     },
     didParseCell: function(data) {
@@ -684,12 +712,20 @@ export const generatePatelCapitalStatement = async (investor, company, startDate
     },
     alternateRowStyles: { fillColor: [248, 250, 252] },
     theme: 'striped',
-    margin: { left: 20, right: 20 },
+    margin: { left: 20, right: 20, bottom: 40 }, // Add bottom margin for footer
     tableWidth: 'wrap'
   });
   
   // Footer with company and Samir's details
-  const finalY = doc.lastAutoTable.finalY + 10;
+  const pageHeight = doc.internal.pageSize.getHeight();
+  let finalY = doc.lastAutoTable.finalY + 10;
+  
+  // Check if footer would go off the page (need ~35mm for footer)
+  if (finalY + 35 > pageHeight) {
+    doc.addPage();
+    finalY = 20; // Start footer near top of new page
+  }
+  
   doc.setDrawColor(31, 58, 96);
   doc.setLineWidth(0.3);
   doc.line(20, finalY, pageWidth - 20, finalY);

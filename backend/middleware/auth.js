@@ -19,7 +19,7 @@ const auth = async (req, res, next) => {
     
     // Get user from database
     const result = await query(
-      'SELECT id, name, email, role, is_active FROM users WHERE id = $1',
+      'SELECT id, full_name as name, email, role, is_active FROM users WHERE id = $1',
       [decoded.id]
     );
 
